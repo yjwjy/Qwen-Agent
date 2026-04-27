@@ -1,26 +1,18 @@
-# Copyright 2023 The Qwen team, Alibaba Group. All rights reserved.
-# 
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-# 
-#    http://www.apache.org/licenses/LICENSE-2.0
-# 
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-
 import os
+import sys
+import time
 from typing import Any, List, Union
 
 import requests
 
 from qwen_agent.tools.base import BaseTool, register_tool
 
-SERPER_API_KEY = os.getenv('SERPER_API_KEY', '')
-SERPER_URL = os.getenv('SERPER_URL', 'https://google.serper.dev/search')
+
+AI_HUB_SEARCH_BASE_URL = os.getenv("AI_HUB_SEARCH_BASE_URL")
+AI_HUB_SEARCH_TOKEN = os.getenv("AI_HUB_SEARCH_TOKEN")
+MAX_RETRIES = int(os.getenv("WEB_SEARCH_MAX_RETRIES", 3))
+RETRY_DELAY = float(os.getenv("WEB_SEARCH_RETRY_DELAY", 1.0))
+TIMEOUT = int(os.getenv("WEB_SEARCH_TIMEOUT", 60))
 
 
 @register_tool('web_search', allow_overwrite=True)
@@ -45,23 +37,47 @@ class WebSearch(BaseTool):
         formatted_results = self._format_results(search_results)
         return formatted_results
 
-    @staticmethod
-    def search(query: str) -> List[Any]:
-        if not SERPER_API_KEY:
+    def search(self, query: str) -> List[Any]:
+        if not AI_HUB_SEARCH_BASE_URL or not AI_HUB_SEARCH_TOKEN:
             raise ValueError(
-                'SERPER_API_KEY is None! Please Apply for an apikey from https://serper.dev and set it as an environment variable by `export SERPER_API_KEY=xxxxxx`'
+                'AI_HUB_SEARCH_BASE_URL or AI_HUB_SEARCH_TOKEN is not set! '
+                'Please set them as environment variables.'
             )
-        headers = {'Content-Type': 'application/json', 'X-API-KEY': SERPER_API_KEY}
-        payload = {'q': query}
-        response = requests.post(SERPER_URL, json=payload, headers=headers)
-        response.raise_for_status()
 
-        return response.json()['organic']
+        url = f"{AI_HUB_SEARCH_BASE_URL}/customsearch/google/search"
+        headers = {
+            "Authorization": f"Bearer {AI_HUB_SEARCH_TOKEN}",
+            "Content-Type": "application/json",
+        }
+        body = {"q": query}
+
+        for i in range(MAX_RETRIES):
+            try:
+                response = requests.post(url, headers=headers, json=body, timeout=TIMEOUT)
+                response.raise_for_status()
+                results = response.json()
+
+                organic_results = []
+                if "organic" in results:
+                    organic_results = results["organic"]
+                else:
+                    for value in results.values():
+                        if isinstance(value, list) and len(value) > 0:
+                            organic_results = value
+                            break
+
+                return organic_results
+            except Exception as e:
+                if i < MAX_RETRIES - 1:
+                    print(f"Error occurred during web search: {e}, retry {i + 1}/{MAX_RETRIES}", file=sys.stderr)
+                    time.sleep(RETRY_DELAY)
+                else:
+                    raise ValueError(f"Error occurred during web search: {e}")
 
     @staticmethod
     def _format_results(search_results: List[Any]) -> str:
         content = '```\n{}\n```'.format('\n\n'.join([
-            f"[{i}]\"{doc['title']}\n{doc.get('snippet', '')}\"{doc.get('date', '')}"
+            f"[{i}]\"{doc.get('title', '')}\n{doc.get('snippet', '')}\nLink: {doc.get('link', '')}"
             for i, doc in enumerate(search_results, 1)
         ]))
         return content
